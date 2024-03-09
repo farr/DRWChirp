@@ -4,9 +4,11 @@ channels:
   - defaults
 dependencies:
   - python=3
+  - pip
   - jupyterlab
   - numpyro
   - seaborn
   - arviz
-  - jax
+  - pip:
+    - celerite2
 prefix: /Users/wfarr/miniconda3/envs/DRWChirp
