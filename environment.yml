@@ -9,6 +9,7 @@ dependencies:
   - numpyro
   - seaborn
   - arviz
+  - ipywidgets
   - pip:
     - celerite2
 prefix: /Users/wfarr/miniconda3/envs/DRWChirp

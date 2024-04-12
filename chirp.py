@@ -20,7 +20,8 @@ def chirp(t, a, b, tc, mc):
     coalescence time `tc` and chirp mass `mc`.
     """
     phi = chirp_phase(t, tc, mc)
-    return a*jnp.cos(phi) + b*jnp.sin(phi)
+    phi0 = chirp_phase(0, tc, mc)
+    return a*jnp.cos(phi-phi0) + b*jnp.sin(phi-phi0)
 
 def chirp_frequency(t, tc, mc):
     """Returns the instantaneous angular frequency of a chirp signal at time `t`,
@@ -34,6 +35,8 @@ def _chirp_frequency(t, tc, mc):
     return 5/8*theta**(-3/8)/mc
 
 def chirp_frequency_derivative(t, tc, mc):
+    """Returns the time derivative of the instantaneous angular frequency of a
+    chirp signal at time `t`."""
     return jnp.where(t < tc, _chirp_frequency_derivative(t, tc, mc), 0)
 
 def _chirp_frequency_derivative(t, tc, mc):
