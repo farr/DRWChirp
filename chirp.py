@@ -1,12 +1,15 @@
+import arviz as az
 from celerite2 import terms as cterms
 from celerite2 import GaussianProcess as cGaussianProcess
 from celerite2.jax import GaussianProcess, terms
 import jax.lax
 import jax.numpy as jnp
 import jax.scipy.special as jsp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import NUTS, MCMC, Predictive
+import xarray as xr
 
 def chirp_phase(t, tc, mc):
     r"""Returns the phase of a chirp signal at time `t`, with coalescence time `tc`
@@ -73,7 +76,7 @@ def drw_chirp_loglike(t, y, yerr, a, b, w, wd, drw_amp, tau):
     drw_process.compute(t, yerr=yerr)
     return drw_process.log_likelihood(y-chirp_signal)
 
-def drw_chirp_model(t, y, yerr, tau_min=0.5, tau_max=2, w0=1.0, wgridsize=10, tooth_prior_width=2, wdot_min=1/2, wdot_max=2, predictive=False):
+def drw_chirp_model(t, y, yerr, w0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, wdot_min=None, wdot_max=None, predictive=False):
     ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
     tmid = jnp.median(t)
 
@@ -85,17 +88,32 @@ def drw_chirp_model(t, y, yerr, tau_min=0.5, tau_max=2, w0=1.0, wgridsize=10, to
     wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
     wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width *jnp.pi/T_w)
 
+    if tau_min is None:
+        tau_min = jnp.median(jnp.diff(t_centered))
+    if tau_max is None:
+        tau_max = jnp.max(t_centered) - jnp.min(t_centered)
     log_tau = numpyro.sample('log_tau', dist.Uniform(jnp.log(tau_min), jnp.log(tau_max)))
     tau = numpyro.deterministic('tau', jnp.exp(log_tau))
 
+    T_wdot = jnp.max(jnp.square(t_centered)) - jnp.min(jnp.square(t_centered))
+    if wdot_min is None:
+        wdot_min = 0.01*2*jnp.pi/T_wdot
+    if wdot_max is None:
+        wdot_max = 2*jnp.pi/T_wdot
     log_wdotmid = numpyro.sample('log_wdotmid', dist.Uniform(jnp.log(wdot_min), jnp.log(wdot_max)))
     wdotmid = numpyro.deterministic('wdotmid', jnp.exp(log_wdotmid))
 
-    a = numpyro.sample('a', dist.Normal(0, 1))
-    b = numpyro.sample('b', dist.Normal(0, 1))
+    if chirp_amp_scale is None:
+        chirp_amp_scale = jnp.std(y)
+    a_unit = numpyro.sample('a_unit', dist.Normal(0, 1))
+    b_unit = numpyro.sample('b_unit', dist.Normal(0, 1))
+    a = numpyro.deterministic('a', a_unit * chirp_amp_scale)
+    b = numpyro.deterministic('b', b_unit * chirp_amp_scale)
     chirp_amp = numpyro.deterministic('chirp_amp', jnp.sqrt(jnp.square(a) + jnp.square(b)))
 
-    log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(0, 1))
+    if drw_amp_scale is None:
+        drw_amp_scale = jnp.std(y)
+    log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(jnp.log(drw_amp_scale), 2))
     drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
 
     ws = wmid_restricted + 2*jnp.pi*kw/T_w
@@ -115,3 +133,28 @@ def drw_chirp_model(t, y, yerr, tau_min=0.5, tau_max=2, w0=1.0, wgridsize=10, to
         numpyro.deterministic('tc', tc + tmid)
 
         numpyro.deterministic('chirp_signal', chirp(t_centered, a, b, tc, mc))
+
+def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, w0, prng_key=None, **kwargs):
+    if prng_key is None:
+        prng_key = jax.random.PRNGKey(np.random.randint(1<<32))
+
+    pred = Predictive(drw_chirp_model, sampler.get_samples())(prng_key, ts, data, obs_uncert, w0=w0, predictive=True, **kwargs)
+    trace = az.from_numpyro(sampler)
+
+    chain_draw = ['chain', 'draw']
+    shape = [trace.posterior.sizes[k] for k in chain_draw]
+    coord = dict(time=ts)
+
+    for k, v in pred.items():
+        if k not in trace.posterior and 'log_like' not in k:
+            # get dimension names
+            if 'chirp_signal' not in k:
+                d = tuple(chain_draw)
+            else:
+                d = tuple(chain_draw + ['time'])
+            # get coordinates
+            c = {c: coord[c] for c in d if c not in chain_draw}
+            v = np.reshape(v, tuple(shape + list(v.shape[1:])))
+            trace.posterior[k] = xr.DataArray(v, coords=c, dims=d)
+
+    return trace
