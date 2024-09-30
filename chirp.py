@@ -76,17 +76,32 @@ def drw_chirp_loglike(t, y, yerr, a, b, w, wd, drw_amp, tau):
     drw_process.compute(t, yerr=yerr)
     return drw_process.log_likelihood(y-chirp_signal)
 
-def drw_chirp_model(t, y, yerr, w0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, wdot_min=None, wdot_max=None, predictive=False):
+def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, wdot_min=None, wdot_max=None, predictive=False):
     ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
     tmid = jnp.median(t)
 
+    if jnp.isscalar(wgridsize):
+        wgridsize, wdotgridsize = wgridsize, wgridsize
+    else:
+        wgridsize, wdotgridsize = wgridsize
+
+    if jnp.isscalar(tooth_prior_width):
+        tooth_prior_width_w, tooth_prior_width_wdot = tooth_prior_width, tooth_prior_width
+    else:
+        tooth_prior_width_w, tooth_prior_width_wdot = tooth_prior_width
+
     kw = jnp.linspace(-wgridsize, wgridsize, 2*wgridsize+1)
+    kwdot = jnp.linspace(-wdotgridsize, wdotgridsize, 2*wdotgridsize+1)
 
     t_centered = (t - tmid)
 
     T_w = jnp.max(t_centered) - jnp.min(t_centered)
     wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
-    wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width *jnp.pi/T_w)
+    wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width_w * jnp.pi/T_w)
+
+    T_wdot = jnp.max(jnp.square(t_centered)) - jnp.min(jnp.square(t_centered))
+    wdotmid_restricted_unit = numpyro.sample('wdotmid_restricted_unit', dist.Normal(0, 1))
+    wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdot0 + wdotmid_restricted_unit * tooth_prior_width_wdot * jnp.pi/T_wdot)
 
     if tau_min is None:
         tau_min = jnp.median(jnp.diff(t_centered))
@@ -94,14 +109,6 @@ def drw_chirp_model(t, y, yerr, w0, chirp_amp_scale=None, drw_amp_scale=None, ta
         tau_max = jnp.max(t_centered) - jnp.min(t_centered)
     log_tau = numpyro.sample('log_tau', dist.Uniform(jnp.log(tau_min), jnp.log(tau_max)))
     tau = numpyro.deterministic('tau', jnp.exp(log_tau))
-
-    T_wdot = jnp.max(jnp.square(t_centered)) - jnp.min(jnp.square(t_centered))
-    if wdot_min is None:
-        wdot_min = 0.01*2*jnp.pi/T_wdot
-    if wdot_max is None:
-        wdot_max = 2*jnp.pi/T_wdot
-    log_wdotmid = numpyro.sample('log_wdotmid', dist.Uniform(jnp.log(wdot_min), jnp.log(wdot_max)))
-    wdotmid = numpyro.deterministic('wdotmid', jnp.exp(log_wdotmid))
 
     if chirp_amp_scale is None:
         chirp_amp_scale = jnp.std(y)
@@ -117,16 +124,21 @@ def drw_chirp_model(t, y, yerr, w0, chirp_amp_scale=None, drw_amp_scale=None, ta
     drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
 
     ws = wmid_restricted + 2*jnp.pi*kw/T_w
+    wdots = wdotmid_restricted + 2*jnp.pi*kwdot/T_wdot
     log_likes = jnp.array(
-        jax.lax.map(lambda w: drw_chirp_loglike(t_centered, y, yerr, a, b, w, wdotmid, drw_amp, tau), ws)
+        jax.lax.map(lambda w: jax.lax.map(lambda wd: drw_chirp_loglike(t_centered, y, yerr, a, b, w, wd, drw_amp, tau), wdots), ws)
     )
 
     # Add up the log likelihoods for each point on the grid, flat prior.
     numpyro.factor('log_like', jsp.logsumexp(log_likes))
 
     if predictive:
-        kw0 = numpyro.sample('kw0', dist.Categorical(logits=log_likes))
+        # log_likes has shape (2*wgridsize+1, 2*wdotgridsize+1)
+        k0 = numpyro.sample('k0', dist.Categorical(logits=log_likes.flatten()))
+        kwdot0 = numpyro.deterministic('kwdot0', k0 % (2*wdotgridsize+1))
+        kw0 = numpyro.deterministic('kw0', k0 // (2*wdotgridsize+1))
         wmid = numpyro.deterministic('wmid', ws[kw0])
+        wdotmid = numpyro.deterministic('wdotmid', wdots[kwdot0])
 
         mc, tc = frequency_frequency_derivative_to_mc_tc(wmid, wdotmid)
         numpyro.deterministic('mc', mc)
@@ -134,11 +146,11 @@ def drw_chirp_model(t, y, yerr, w0, chirp_amp_scale=None, drw_amp_scale=None, ta
 
         numpyro.deterministic('chirp_signal', chirp(t_centered, a, b, tc, mc))
 
-def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, w0, prng_key=None, **kwargs):
+def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, w0, wdot0, prng_key=None, **kwargs):
     if prng_key is None:
         prng_key = jax.random.PRNGKey(np.random.randint(1<<32))
 
-    pred = Predictive(drw_chirp_model, sampler.get_samples())(prng_key, ts, data, obs_uncert, w0=w0, predictive=True, **kwargs)
+    pred = Predictive(drw_chirp_model, sampler.get_samples())(prng_key, ts, data, obs_uncert, w0=w0, wdot0=wdot0, predictive=True, **kwargs)
     trace = az.from_numpyro(sampler)
 
     chain_draw = ['chain', 'draw']
