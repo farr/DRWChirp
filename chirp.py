@@ -1,4 +1,12 @@
+from celerite2 import terms as cterms
+from celerite2 import GaussianProcess as cGaussianProcess
+from celerite2.jax import GaussianProcess, terms
+import jax.lax
 import jax.numpy as jnp
+import jax.scipy.special as jsp
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import NUTS, MCMC, Predictive
 
 def chirp_phase(t, tc, mc):
     r"""Returns the phase of a chirp signal at time `t`, with coalescence time `tc`
@@ -56,3 +64,54 @@ def chirp_time(w, mc):
     """
     theta = (8/5*mc*w)**(-8/3)
     return mc*theta
+
+def drw_chirp_loglike(t, y, yerr, a, b, w, wd, drw_amp, tau):
+    mc, tc = frequency_frequency_derivative_to_mc_tc(w, wd)
+
+    chirp_signal = chirp(t, a, b, tc, mc)
+    drw_process = GaussianProcess(terms.RealTerm(a=drw_amp*drw_amp, c=1/tau))
+    drw_process.compute(t, yerr=yerr)
+    return drw_process.log_likelihood(y-chirp_signal)
+
+def drw_chirp_model(t, y, yerr, tau_min=0.5, tau_max=2, w0=1.0, wgridsize=10, tooth_prior_width=2, wdot_min=1/2, wdot_max=2, predictive=False):
+    ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
+    tmid = jnp.median(t)
+
+    kw = jnp.linspace(-wgridsize, wgridsize, 2*wgridsize+1)
+
+    t_centered = (t - tmid)
+
+    T_w = jnp.max(t_centered) - jnp.min(t_centered)
+    wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
+    wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width *jnp.pi/T_w)
+
+    log_tau = numpyro.sample('log_tau', dist.Uniform(jnp.log(tau_min), jnp.log(tau_max)))
+    tau = numpyro.deterministic('tau', jnp.exp(log_tau))
+
+    log_wdotmid = numpyro.sample('log_wdotmid', dist.Uniform(jnp.log(wdot_min), jnp.log(wdot_max)))
+    wdotmid = numpyro.deterministic('wdotmid', jnp.exp(log_wdotmid))
+
+    a = numpyro.sample('a', dist.Normal(0, 1))
+    b = numpyro.sample('b', dist.Normal(0, 1))
+    chirp_amp = numpyro.deterministic('chirp_amp', jnp.sqrt(jnp.square(a) + jnp.square(b)))
+
+    log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(0, 1))
+    drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
+
+    ws = wmid_restricted + 2*jnp.pi*kw/T_w
+    log_likes = jnp.array(
+        jax.lax.map(lambda w: drw_chirp_loglike(t_centered, y, yerr, a, b, w, wdotmid, drw_amp, tau), ws)
+    )
+
+    # Add up the log likelihoods for each point on the grid, flat prior.
+    numpyro.factor('log_like', jsp.logsumexp(log_likes))
+
+    if predictive:
+        kw0 = numpyro.sample('kw0', dist.Categorical(logits=log_likes))
+        wmid = numpyro.deterministic('wmid', ws[kw0])
+
+        mc, tc = frequency_frequency_derivative_to_mc_tc(wmid, wdotmid)
+        numpyro.deterministic('mc', mc)
+        numpyro.deterministic('tc', tc + tmid)
+
+        numpyro.deterministic('chirp_signal', chirp(t_centered, a, b, tc, mc))
