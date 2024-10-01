@@ -34,6 +34,13 @@ def chirp(t, a, b, tc, mc):
     phi0 = chirp_phase(0, tc, mc)
     return a*jnp.cos(phi-phi0) + b*jnp.sin(phi-phi0)
 
+def dummy_chirp(t, a, b, tc, mc):
+    w = chirp_frequency(0.0, tc, mc)
+    wdot = chirp_frequency_derivative(0.0, tc, mc)
+
+    phase = w*t + (wdot*t)*t
+    return a*jnp.cos(phase) + b*jnp.sin(phase)
+
 def chirp_frequency(t, tc, mc):
     """Returns the instantaneous angular frequency of a chirp signal at time `t`,
     with coalescence time `tc` and chirp mass `mc`.
@@ -56,10 +63,12 @@ def _chirp_frequency_derivative(t, tc, mc):
     return 15/64*theta**(-11/8)/(mc*mc)
 
 def frequency_frequency_derivative_to_mc_tc(w, wdot):
+    negative_flag = (w < 0) | (wdot < 0)
+
     mc = 5/8*(5/3)**(3/5)*wdot**(3/5)/w**(11/5)
     tc = 3*w/(8*wdot)
 
-    return (mc, tc)
+    return (jnp.where(negative_flag, 1, mc), jnp.where(negative_flag, -jnp.inf, tc))
 
 def chirp_time(w, mc):
     """Returns the time before coalescence at which a chirp signal has frequency
@@ -123,11 +132,11 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(jnp.log(drw_amp_scale), 2))
     drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
 
-    ws = wmid_restricted + 2*jnp.pi*kw/T_w
-    wdots = wdotmid_restricted + 2*jnp.pi*kwdot/T_wdot
-    log_likes = jnp.array(
+    ws = numpyro.deterministic('ws', wmid_restricted + 2*jnp.pi*kw/T_w)
+    wdots = numpyro.deterministic('wdots', wdotmid_restricted + 2*jnp.pi*kwdot/T_wdot)
+    log_likes = numpyro.deterministic('log_likes', jnp.array(
         jax.lax.map(lambda w: jax.lax.map(lambda wd: drw_chirp_loglike(t_centered, y, yerr, a, b, w, wd, drw_amp, tau), wdots), ws)
-    )
+    ))
 
     # Add up the log likelihoods for each point on the grid, flat prior.
     numpyro.factor('log_like', jsp.logsumexp(log_likes))
