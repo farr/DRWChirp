@@ -85,7 +85,7 @@ def drw_chirp_loglike(t, y, yerr, a, b, w, wd, drw_amp, tau):
     drw_process.compute(t, yerr=yerr)
     return drw_process.log_likelihood(y-chirp_signal)
 
-def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, wdot_min=None, wdot_max=None, predictive=False):
+def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, predictive=False):
     ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
     tmid = jnp.median(t)
 
