@@ -108,7 +108,7 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
     wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width_w * jnp.pi/T_w)
 
-    T_wdot = jnp.max(jnp.square(t_centered)) - jnp.min(jnp.square(t_centered))
+    T_wdot = jnp.max(jnp.square(t_centered)) - jnp.min(jnp.square(t_centered))/2
     wdotmid_restricted_unit = numpyro.sample('wdotmid_restricted_unit', dist.Normal(0, 1))
     wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdot0 + wdotmid_restricted_unit * tooth_prior_width_wdot * jnp.pi/T_wdot)
 
@@ -159,7 +159,8 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
         numpyro.deterministic('chirp_signal', chirp(t_centered, a, b, tc, mc))
 
         if t_grid is not None:
-            numpyro.deterministic('chirp_signal_grid', chirp(t_grid, a, b, tc, mc))
+            t_grid_centered = t_grid - tmid
+            numpyro.deterministic('chirp_signal_grid', chirp(t_grid_centered, a, b, tc, mc))
 
 def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, w0, wdot0, prng_key=None, **kwargs):
     if prng_key is None:
@@ -171,12 +172,16 @@ def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, w0, wd
     chain_draw = ['chain', 'draw']
     shape = [trace.posterior.sizes[k] for k in chain_draw]
     coord = dict(time=ts)
+    if 't_grid' in kwargs:
+        coord['time_grid'] = kwargs['t_grid']
 
     for k, v in pred.items():
         if k not in trace.posterior and 'log_like' not in k:
             # get dimension names
             if 'chirp_signal' not in k:
                 d = tuple(chain_draw)
+            elif 'chirp_signal_grid' in k:
+                d = tuple(chain_draw + ['time_grid'])
             else:
                 d = tuple(chain_draw + ['time'])
             # get coordinates
