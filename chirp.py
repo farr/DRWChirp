@@ -77,13 +77,13 @@ def chirp_time(w, mc):
     theta = (8/5*mc*w)**(-8/3)
     return mc*theta
 
-def drw_chirp_loglike(t, y, yerr, a, b, w, wd, drw_amp, tau):
+def drw_chirp_loglike(t, y, yerr, mu, a, b, w, wd, drw_amp, tau):
     mc, tc = frequency_frequency_derivative_to_mc_tc(w, wd)
 
     chirp_signal = chirp(t, a, b, tc, mc)
     drw_process = GaussianProcess(terms.RealTerm(a=drw_amp*drw_amp, c=1/tau))
     drw_process.compute(t, yerr=yerr)
-    return drw_process.log_likelihood(y-chirp_signal)
+    return drw_process.log_likelihood(y-mu-chirp_signal)
 
 def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, predictive=False):
     ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
@@ -119,6 +119,9 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     log_tau = numpyro.sample('log_tau', dist.Uniform(jnp.log(tau_min), jnp.log(tau_max)))
     tau = numpyro.deterministic('tau', jnp.exp(log_tau))
 
+    mu_unit = numpyro.sample('mu_unit', dist.Normal(0, 1))
+    mu = numpyro.deterministic('mu', jnp.mean(y) + mu_unit * jnp.std(y))
+
     if chirp_amp_scale is None:
         chirp_amp_scale = jnp.std(y)
     a_unit = numpyro.sample('a_unit', dist.Normal(0, 1))
@@ -135,7 +138,7 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     ws = numpyro.deterministic('ws', wmid_restricted + 2*jnp.pi*kw/T_w)
     wdots = numpyro.deterministic('wdots', wdotmid_restricted + 2*jnp.pi*kwdot/T_wdot)
     log_likes = numpyro.deterministic('log_likes', jnp.array(
-        jax.lax.map(lambda w: jax.lax.map(lambda wd: drw_chirp_loglike(t_centered, y, yerr, a, b, w, wd, drw_amp, tau), wdots), ws)
+        jax.lax.map(lambda w: jax.lax.map(lambda wd: drw_chirp_loglike(t_centered, y, yerr, mu, a, b, w, wd, drw_amp, tau), wdots), ws)
     ))
 
     # Add up the log likelihoods for each point on the grid, flat prior.
