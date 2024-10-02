@@ -103,14 +103,16 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     kwdot = jnp.linspace(-wdotgridsize, wdotgridsize, 2*wdotgridsize+1)
 
     t_centered = (t - tmid)
+    T = jnp.max(t_centered) - jnp.min(t_centered)
+    T2 = jnp.square(T)
 
-    T_w = jnp.max(t_centered) - jnp.min(t_centered)
+    frequency_comb_spacing = 7.72525 # This is the distance to the first sideband of the likelihood in white noise for a sinusoidal signal
     wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
-    wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width_w * jnp.pi/T_w)
+    wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width_w * frequency_comb_spacing / 2 / T)
 
-    T_wdot = jnp.square(jnp.max(t_centered) - jnp.min(t_centered))/2
+    frequency_derivative_comb_spacing = 15.121 # This is the distance to the first sideband of the likelihood for exp(1/2 I wdot t^2) signal
     wdotmid_restricted_unit = numpyro.sample('wdotmid_restricted_unit', dist.Normal(0, 1))
-    wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdot0 + wdotmid_restricted_unit * tooth_prior_width_wdot * jnp.pi/T_wdot)
+    wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdot0 + wdotmid_restricted_unit * tooth_prior_width_wdot * frequency_derivative_comb_spacing / 2 / T2)
 
     if tau_min is None:
         tau_min = jnp.median(jnp.diff(t_centered))
@@ -135,8 +137,8 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(jnp.log(drw_amp_scale), 2))
     drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
 
-    ws = numpyro.deterministic('ws', wmid_restricted + 2*jnp.pi*kw/T_w)
-    wdots = numpyro.deterministic('wdots', wdotmid_restricted + 2*jnp.pi*kwdot/T_wdot)
+    ws = numpyro.deterministic('ws', wmid_restricted + frequency_comb_spacing*kw/T)
+    wdots = numpyro.deterministic('wdots', wdotmid_restricted + frequency_derivative_comb_spacing*kwdot/T2)
     log_likes = numpyro.deterministic('log_likes', jnp.array(
         jax.lax.map(lambda w: jax.lax.map(lambda wd: drw_chirp_loglike(t_centered, y, yerr, mu, a, b, w, wd, drw_amp, tau), wdots), ws)
     ))
