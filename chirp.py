@@ -108,7 +108,7 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
     wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width_w * jnp.pi/T_w)
 
-    T_wdot = jnp.max(jnp.square(t_centered)) - jnp.min(jnp.square(t_centered))/2
+    T_wdot = jnp.square(jnp.max(t_centered) - jnp.min(t_centered))/2
     wdotmid_restricted_unit = numpyro.sample('wdotmid_restricted_unit', dist.Normal(0, 1))
     wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdot0 + wdotmid_restricted_unit * tooth_prior_width_wdot * jnp.pi/T_wdot)
 
