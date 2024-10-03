@@ -11,6 +11,9 @@ import numpyro.distributions as dist
 from numpyro.infer import NUTS, MCMC, Predictive
 import xarray as xr
 
+frequency_spacing_constant = 7.72525 # This is the distance to the first sideband of the likelihood in white noise for a sinusoidal signal
+frequency_derivative_spacing_constant = 15.121 # This is the distance to the first sideband of the likelihood for exp(1/2 I wdot t^2) signal
+
 def chirp_phase(t, tc, mc):
     r"""Returns the phase of a chirp signal at time `t`, with coalescence time `tc`
     and chirp mass `mc`.
@@ -19,19 +22,27 @@ def chirp_phase(t, tc, mc):
 
         \phi(t) = -\left(\\frac{t_c - t}{m_c}\\right)^{5/8}    
     """
-    return jnp.where(t < tc, _chirp_phase(t, tc, mc), 0)
+    # Broadcast the inputs to the same shape
+    t_shape = t.shape
+    tc_shape = tc.shape
+    mc_shape = mc.shape
 
-def _chirp_phase(t, tc, mc):
+    assert tc_shape == mc_shape, 'incompatible shapes in tc and mc'
+
+    tc = tc[(slice(None),)*len(tc_shape) + (jnp.newaxis,)*len(t_shape)]
+    mc = mc[(slice(None),)*len(mc_shape) + (jnp.newaxis,)*len(t_shape)]
+    t = t[(jnp.newaxis,)*len(tc_shape) + (slice(None),)*len(t_shape)]
+
     theta = (tc - t) / mc
 
-    return -theta**(5/8)
+    return jnp.where(theta > 0, -theta**(5/8), 0)
 
 def chirp(t, a, b, tc, mc):
     """Returns a chirping signal with `a` cosine and `b` sine quadratures,
     coalescence time `tc` and chirp mass `mc`.
     """
     phi = chirp_phase(t, tc, mc)
-    phi0 = chirp_phase(0, tc, mc)
+    phi0 = chirp_phase(jnp.array([0.0]), tc, mc)
     return a*jnp.cos(phi-phi0) + b*jnp.sin(phi-phi0)
 
 def dummy_chirp(t, a, b, tc, mc):
@@ -77,6 +88,12 @@ def chirp_time(w, mc):
     theta = (8/5*mc*w)**(-8/3)
     return mc*theta
 
+def frequency_frequencydot_bounds_to_gridsize(wbounds, wdotbounds, T):
+    wgridsize = int(jnp.ceil(T*(wbounds[1] - wbounds[0]) / frequency_spacing_constant))
+    wdotgridsize = int(jnp.ceil(T*T*(wdotbounds[1] - wdotbounds[0]) / frequency_derivative_spacing_constant))
+
+    return ((wbounds[0], wgridsize), (wdotbounds[0], wdotgridsize))
+
 def drw_chirp_loglike(t, y, yerr, mu, a, b, w, wd, drw_amp, tau):
     mc, tc = frequency_frequency_derivative_to_mc_tc(w, wd)
 
@@ -85,34 +102,31 @@ def drw_chirp_loglike(t, y, yerr, mu, a, b, w, wd, drw_amp, tau):
     drw_process.compute(t, yerr=yerr)
     return drw_process.log_likelihood(y-mu-chirp_signal)
 
-def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, wgridsize=10, tooth_prior_width=2, t_grid=None, predictive=False):
+def drw_chirp_model(t, y, yerr, wgrid, wdotgrid, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, t_grid=None, predictive=False):
     ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
     tmid = jnp.median(t)
-
-    if jnp.isscalar(wgridsize):
-        wgridsize, wdotgridsize = wgridsize, wgridsize
-    else:
-        wgridsize, wdotgridsize = wgridsize
-
-    if jnp.isscalar(tooth_prior_width):
-        tooth_prior_width_w, tooth_prior_width_wdot = tooth_prior_width, tooth_prior_width
-    else:
-        tooth_prior_width_w, tooth_prior_width_wdot = tooth_prior_width
-
-    kw = jnp.linspace(-wgridsize, wgridsize, 2*wgridsize+1)
-    kwdot = jnp.linspace(-wdotgridsize, wdotgridsize, 2*wdotgridsize+1)
 
     t_centered = (t - tmid)
     T = jnp.max(t_centered) - jnp.min(t_centered)
     T2 = jnp.square(T)
 
-    frequency_comb_spacing = 7.72525 # This is the distance to the first sideband of the likelihood in white noise for a sinusoidal signal
-    wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.Normal(0, 1))
-    wmid_restricted = numpyro.deterministic('wmid_restricted', w0 + wmid_restricted_unit * tooth_prior_width_w * frequency_comb_spacing / 2 / T)
+    nkw = wgrid[1]
+    nkwdot = wdotgrid[1]
 
-    frequency_derivative_comb_spacing = 15.121 # This is the distance to the first sideband of the likelihood for exp(1/2 I wdot t^2) signal
-    wdotmid_restricted_unit = numpyro.sample('wdotmid_restricted_unit', dist.Normal(0, 1))
-    wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdot0 + wdotmid_restricted_unit * tooth_prior_width_wdot * frequency_derivative_comb_spacing / 2 / T2)
+    frequency_comb_spacing = frequency_spacing_constant / T # This is the distance to the first sideband of the likelihood in white noise for a sinusoidal signal
+    wmid_restricted_unit = numpyro.sample('wmid_restricted_unit', dist.TruncatedNormal(0,1,low=0))
+    wmid_restricted = numpyro.deterministic('wmid_restricted', wgrid[0] + wmid_restricted_unit * frequency_comb_spacing)
+
+    frequency_derivative_comb_spacing = frequency_derivative_spacing_constant / T2
+    wdotmid_restricted_unit = numpyro.sample('wdotmid_restricted_unit', dist.TruncatedNormal(0,1,low=0))
+    wdotmid_restricted = numpyro.deterministic('wdotmid_restricted', wdotgrid[0] + wdotmid_restricted_unit * frequency_derivative_comb_spacing)
+
+    k = numpyro.sample('k', dist.Categorical(logits=jnp.zeros(nkw*nkwdot)))
+    kw = numpyro.deterministic('kw', k % nkw)
+    kwdot = numpyro.deterministic('kwdot', k // nkw)
+
+    wmid = numpyro.deterministic('wmid', wmid_restricted + frequency_comb_spacing*kw)
+    wdotmid = numpyro.deterministic('wdotmid', wdotmid_restricted + frequency_derivative_comb_spacing*kwdot)
 
     if tau_min is None:
         tau_min = jnp.median(jnp.diff(t_centered))
@@ -137,23 +151,10 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
     log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(jnp.log(drw_amp_scale), 2))
     drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
 
-    ws = numpyro.deterministic('ws', wmid_restricted + frequency_comb_spacing*kw/T)
-    wdots = numpyro.deterministic('wdots', wdotmid_restricted + frequency_derivative_comb_spacing*kwdot/T2)
-    log_likes = numpyro.deterministic('log_likes', jnp.array(
-        jax.lax.map(lambda w: jax.lax.map(lambda wd: drw_chirp_loglike(t_centered, y, yerr, mu, a, b, w, wd, drw_amp, tau), wdots), ws)
-    ))
-
-    # Add up the log likelihoods for each point on the grid, flat prior.
-    numpyro.factor('log_like', jsp.logsumexp(log_likes))
+    numpyro.factor('log_like', drw_chirp_loglike(t_centered, y, yerr, mu, a, b, wmid, wdotmid, drw_amp, tau))
 
     if predictive:
         # log_likes has shape (2*wgridsize+1, 2*wdotgridsize+1)
-        k0 = numpyro.sample('k0', dist.Categorical(logits=log_likes.flatten()))
-        kwdot0 = numpyro.deterministic('kwdot0', k0 % (2*wdotgridsize+1))
-        kw0 = numpyro.deterministic('kw0', k0 // (2*wdotgridsize+1))
-        wmid = numpyro.deterministic('wmid', ws[kw0])
-        wdotmid = numpyro.deterministic('wdotmid', wdots[kwdot0])
-
         mc, tc = frequency_frequency_derivative_to_mc_tc(wmid, wdotmid)
         numpyro.deterministic('mc', mc)
         numpyro.deterministic('tc', tc + tmid)
@@ -164,11 +165,11 @@ def drw_chirp_model(t, y, yerr, w0, wdot0, chirp_amp_scale=None, drw_amp_scale=N
             t_grid_centered = t_grid - tmid
             numpyro.deterministic('chirp_signal_grid', chirp(t_grid_centered, a, b, tc, mc))
 
-def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, w0, wdot0, prng_key=None, **kwargs):
+def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, wgrid, wdotgrid, prng_key=None, **kwargs):
     if prng_key is None:
         prng_key = jax.random.PRNGKey(np.random.randint(1<<32))
 
-    pred = Predictive(drw_chirp_model, sampler.get_samples())(prng_key, ts, data, obs_uncert, w0=w0, wdot0=wdot0, predictive=True, **kwargs)
+    pred = Predictive(drw_chirp_model, sampler.get_samples())(prng_key, ts, data, obs_uncert, wgrid, wdotgrid, predictive=True, **kwargs)
     trace = az.from_numpyro(sampler)
 
     chain_draw = ['chain', 'draw']
