@@ -4,6 +4,7 @@ from celerite2 import GaussianProcess as cGaussianProcess
 from celerite2.jax import GaussianProcess, terms
 import jax.lax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsl
 import jax.scipy.special as jsp
 import numpy as np
 import numpyro
@@ -37,13 +38,21 @@ def chirp_phase(t, tc, mc):
 
     return jnp.where(theta > 0, -theta**(5/8), 0)
 
+def chirp_quadratures(t, tc, mc):
+    phi = chirp_phase(t, tc, mc)
+    phi0 = chirp_phase(jnp.array([0.0]), tc, mc)
+    return jnp.cos(phi-phi0), jnp.sin(phi-phi0)
+
 def chirp(t, a, b, tc, mc):
     """Returns a chirping signal with `a` cosine and `b` sine quadratures,
     coalescence time `tc` and chirp mass `mc`.
     """
     phi = chirp_phase(t, tc, mc)
     phi0 = chirp_phase(jnp.array([0.0]), tc, mc)
-    return a*jnp.cos(phi-phi0) + b*jnp.sin(phi-phi0)
+
+    c, s = chirp_quadratures(t, tc, mc)
+
+    return a*c + b*s
 
 def dummy_chirp(t, a, b, tc, mc):
     w = chirp_frequency(0.0, tc, mc)
@@ -94,13 +103,38 @@ def frequency_frequencydot_bounds_to_gridsize(wbounds, wdotbounds, T):
 
     return ((wbounds[0], wgridsize), (wdotbounds[0], wdotgridsize))
 
-def drw_chirp_loglike(t, y, yerr, mu, a, b, w, wd, drw_amp, tau):
+def drw_chirp_marginal_loglike(t, y, yerr, mu_mean, mu_scale, chirp_amp_scale, w, wd, drw_amp, tau):
+    nt = t.shape[0]
+
     mc, tc = frequency_frequency_derivative_to_mc_tc(w, wd)
 
-    chirp_signal = chirp(t, a, b, tc, mc)
+    cq, sq = chirp_quadratures(t, tc, mc)
+    M = jnp.column_stack((jnp.ones(nt), cq, sq))
+    mu = jnp.array([mu_mean, 0.0, 0.0])
+    L = jnp.diag(jnp.array([mu_scale*mu_scale, chirp_amp_scale*chirp_amp_scale, chirp_amp_scale*chirp_amp_scale]))
+    Linv = jnp.diag(1/jnp.diag(L))
+
     drw_process = GaussianProcess(terms.RealTerm(a=drw_amp*drw_amp, c=1/tau))
     drw_process.compute(t, yerr=yerr)
-    return drw_process.log_likelihood(y-mu-chirp_signal)
+
+    Ainv = Linv + M.T @ drw_process.apply_inverse(M)
+    Ainv_chol = jnp.linalg.cholesky(Ainv)
+
+    a = jsl.cho_solve((Ainv_chol, True), (Linv @ mu + M.T @ drw_process.apply_inverse(y)))
+
+    b = M @ mu
+    r = y - b
+
+    Cinvr = drw_process.apply_inverse(r)
+    MTCinvr = M.T @ Cinvr
+    AMTCinvr = jsl.cho_solve((Ainv_chol, True), MTCinvr)
+    MAMTCinvr = M @ AMTCinvr
+    CinvMAMTCinvr = drw_process.apply_inverse(MAMTCinvr)
+
+    chi2 = jnp.sum(r * (Cinvr - CinvMAMTCinvr))
+    logdetB = jnp.sum(jnp.log(jnp.diag(L))) + drw_process._log_det + 2*jnp.sum(jnp.log(jnp.diag(Ainv_chol)))
+
+    return (-0.5*chi2 - 0.5*logdetB), a, Ainv_chol
 
 def drw_chirp_model(t, y, yerr, wgrid, wdotgrid, chirp_amp_scale=None, drw_amp_scale=None, tau_min=None, tau_max=None, t_grid=None, predictive=False):
     ## TODO: think about priors.  Current prior is a bit odd (flat in broad frequency, flat in log within a frequency cell)
@@ -135,29 +169,34 @@ def drw_chirp_model(t, y, yerr, wgrid, wdotgrid, chirp_amp_scale=None, drw_amp_s
     log_tau = numpyro.sample('log_tau', dist.Uniform(jnp.log(tau_min), jnp.log(tau_max)))
     tau = numpyro.deterministic('tau', jnp.exp(log_tau))
 
-    mu_unit = numpyro.sample('mu_unit', dist.Normal(0, 1))
-    mu = numpyro.deterministic('mu', jnp.mean(y) + mu_unit * jnp.std(y))
+    mu_mean = jnp.mean(y)
+    mu_scale = jnp.std(y)
 
     if chirp_amp_scale is None:
         chirp_amp_scale = jnp.std(y)
-    a_unit = numpyro.sample('a_unit', dist.Normal(0, 1))
-    b_unit = numpyro.sample('b_unit', dist.Normal(0, 1))
-    a = numpyro.deterministic('a', a_unit * chirp_amp_scale)
-    b = numpyro.deterministic('b', b_unit * chirp_amp_scale)
-    chirp_amp = numpyro.deterministic('chirp_amp', jnp.sqrt(jnp.square(a) + jnp.square(b)))
 
     if drw_amp_scale is None:
         drw_amp_scale = jnp.std(y)
     log_drw_amp = numpyro.sample('log_drw_amp', dist.Normal(jnp.log(drw_amp_scale), 2))
     drw_amp = numpyro.deterministic('drw_amp', jnp.exp(log_drw_amp))
 
-    numpyro.factor('log_like', drw_chirp_loglike(t_centered, y, yerr, mu, a, b, wmid, wdotmid, drw_amp, tau))
+    logl, a, Ainv_chol = drw_chirp_marginal_loglike(t_centered, y, yerr, mu_mean, mu_scale, chirp_amp_scale, wmid, wdotmid, drw_amp, tau)
+    numpyro.factor('log_like', logl)
 
     if predictive:
         # log_likes has shape (2*wgridsize+1, 2*wdotgridsize+1)
         mc, tc = frequency_frequency_derivative_to_mc_tc(wmid, wdotmid)
         numpyro.deterministic('mc', mc)
         numpyro.deterministic('tc', tc + tmid)
+
+        # A^{-1} = LI LI^T => A = (LI^T)^{-1} LI^{-1}
+        mu_a_b_unit = numpyro.sample('mu_a_b_unit', dist.Normal(0, 1), sample_shape=(3,))
+        mu_a_b = jsl.solve_triangular(Ainv_chol.T, mu_a_b_unit, lower=False) + a
+
+        mu = numpyro.deterministic('mu', mu_a_b[0])
+        a = numpyro.deterministic('a', mu_a_b[1])
+        b = numpyro.deterministic('b', mu_a_b[2])
+        chirp_amp = numpyro.deterministic('chirp_amp', jnp.sqrt(jnp.square(a) + jnp.square(b)))
 
         numpyro.deterministic('chirp_signal', chirp(t_centered, a, b, tc, mc))
 
@@ -174,19 +213,21 @@ def from_numpyro_with_generated_quantities(sampler, ts, data, obs_uncert, wgrid,
 
     chain_draw = ['chain', 'draw']
     shape = [trace.posterior.sizes[k] for k in chain_draw]
-    coord = dict(time=ts)
+    coord = dict(time=ts, mu_a_b_unit=np.array([0,1,2]))
     if 't_grid' in kwargs:
         coord['time_grid'] = kwargs['t_grid']
 
     for k, v in pred.items():
         if k not in trace.posterior and 'log_like' not in k:
             # get dimension names
-            if 'chirp_signal' not in k:
+            if 'chirp_signal' not in k and 'mu_a_b_unit' not in k:
                 d = tuple(chain_draw)
             elif 'chirp_signal_grid' in k:
                 d = tuple(chain_draw + ['time_grid'])
-            else:
+            elif 'chirp_signal' in k:
                 d = tuple(chain_draw + ['time'])
+            else:
+                d = tuple(chain_draw + ['mu_a_b_unit'])
             # get coordinates
             c = {c: coord[c] for c in d if c not in chain_draw}
             v = np.reshape(v, tuple(shape + list(v.shape[1:])))
