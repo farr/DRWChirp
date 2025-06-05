@@ -1,7 +1,6 @@
 name: DRWChirp
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - python=3
   - pip
@@ -11,6 +10,7 @@ dependencies:
   - seaborn
   - arviz
   - ipywidgets
+  - jax<0.5
   - pip:
     - celerite2
 prefix: /Users/wfarr/miniconda3/envs/DRWChirp
