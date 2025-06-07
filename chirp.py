@@ -15,7 +15,7 @@ import xarray as xr
 frequency_spacing_constant = 7.72525 # This is the distance to the first sideband of the likelihood in white noise for a sinusoidal signal
 frequency_derivative_spacing_constant = 15.121 # This is the distance to the first sideband of the likelihood for exp(1/2 I wdot t^2) signal
 
-chirp_mass_constant = 5 / 2**(8/5)
+chirp_mass_constant = 5
 
 def chirp_phase(t, tc, mc):
     r"""Returns the phase of a chirp signal at time `t`, with coalescence time `tc`
