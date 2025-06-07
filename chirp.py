@@ -19,7 +19,7 @@ chirp_mass_constant = 5
 
 def chirp_phase(t, tc, mc):
     r"""Returns the phase of a chirp signal at time `t`, with coalescence time `tc`
-    and chirp mass `mc`.
+    and chirp mass `mc`.  `mc` should be in the same time units as `t`.
 
     .. math::
 
